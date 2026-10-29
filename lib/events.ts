@@ -34,6 +34,17 @@ export type EventUpdates = {
   status?: EventStatus;
 };
 
+function getMissingColumn(
+  error: { code?: string; message?: string } | null
+): string | null {
+  if (!error || error.code !== 'PGRST204' || !error.message) {
+    return null;
+  }
+
+  const match = error.message.match(/Could not find the '([^']+)' column/);
+  return match ? match[1] : null;
+}
+
 export async function createEvent(
   event: Event
 ): Promise<{ error: string | null }> {
@@ -41,7 +52,7 @@ export async function createEvent(
     data: { user },
   } = await supabase.auth.getUser();
 
-  const { error } = await supabase.from('events').insert({
+  const payload: Record<string, unknown> = {
     event_code: event.eventId,
     title: event.title,
     start_time: event.start || null,
@@ -49,25 +60,57 @@ export async function createEvent(
     venue: event.venue || null,
     description: event.description || null,
     created_by: user?.id ?? null,
-  });
+  };
 
-  if (error?.code === '23505') {
-    return { error: 'An event with this code already exists.' };
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const { error } = await supabase.from('events').insert(payload);
+
+    if (!error) {
+      return { error: null };
+    }
+
+    const missing = getMissingColumn(error);
+    if (missing && missing in payload) {
+      delete payload[missing];
+      continue;
+    }
+
+    if (error.code === '23505') {
+      return { error: 'An event with this code already exists.' };
+    }
+
+    return { error: error.message };
   }
 
-  return { error: error?.message ?? null };
+  return { error: 'Could not create the event.' };
 }
 
 export async function updateEvent(
   eventId: string,
   updates: EventUpdates
 ): Promise<{ error: string | null }> {
-  const { error } = await supabase
-    .from('events')
-    .update(updates)
-    .eq('id', eventId);
+  const payload: Record<string, unknown> = { ...updates };
 
-  return { error: error?.message ?? null };
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    const { error } = await supabase
+      .from('events')
+      .update(payload)
+      .eq('id', eventId);
+
+    if (!error) {
+      return { error: null };
+    }
+
+    const missing = getMissingColumn(error);
+    if (missing && missing in payload) {
+      delete payload[missing];
+      continue;
+    }
+
+    return { error: error.message };
+  }
+
+  return { error: 'Could not update the event.' };
 }
 
 export async function getEventsByTeacher(
